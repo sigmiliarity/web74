@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <script>
+(function() {
+    const splitFiles = {
+        "pikubog.data.unityweb": { parts: 5, prefix: "Build/pikubog.data.unityweb.part" },
+        "pikubog.wasm.code.unityweb": { parts: 5, prefix: "Build/pikubog.wasm.code.unityweb.part" }
+    };
+
+    const blobUrls = {};
+    const loadPromises = {};
+
+    // Start fetching and stitching parts immediately
+    for (const [filename, info] of Object.entries(splitFiles)) {
+        loadPromises[filename] = (async () => {
+            try {
+                const buffers = [];
+                for (let i = 1; i <= info.parts; i++) {
+                    const partName = info.prefix + i;
+                    console.log("Fetching part:", partName);
+                    const res = await fetch(partName);
+                    if (!res.ok) throw new Error(`Failed to load ${partName} (Status: ${res.status})`);
+                    buffers.push(await res.arrayBuffer());
+                }
+                const blob = new Blob(buffers, { type: "application/octet-stream" });
+                blobUrls[filename] = URL.createObjectURL(blob);
+                console.log("Successfully stitched split file into blob:", filename);
+            } catch (err) {
+                console.error("Error stitching split file:", filename, err);
+            }
+        })();
+    }
+
+    function getFilename(url) {
+        if (typeof url !== 'string') return '';
+        try {
+            return url.split('/').pop().split('?')[0];
+        } catch (e) {
+            return '';
+        }
+    }
+
+    // --- Patch Fetch ---
+    const originalFetch = window.fetch;
+    window.fetch = async function(resource, init) {
+        const url = typeof resource === 'string' ? resource : (resource && resource.url ? resource.url : '');
+        const filename = getFilename(url);
+
+        if (splitFiles[filename]) {
+            if (!blobUrls[filename]) {
+                console.log("Fetch waiting for split file to finish stitching:", filename);
+                await loadPromises[filename];
+            }
+            if (blobUrls[filename]) {
+                console.log("Serving fetch from stitched blob:", filename);
+                if (typeof resource === 'string') {
+                    return originalFetch(blobUrls[filename], init);
+                } else {
+                    const newReq = new Request(blobUrls[filename], resource);
+                    return originalFetch(newReq, init);
+                }
+            }
+        }
+        return originalFetch.apply(this, arguments);
+    };
+
+    // --- Patch XMLHttpRequest (with Deferred Queuing) ---
+    const originalXHROpen = XMLHttpRequest.prototype.open;
+    const originalXHRSend = XMLHttpRequest.prototype.send;
+
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        const filename = getFilename(url);
+        if (splitFiles[filename]) {
+            this._isSplitFile = true;
+            this._splitFilename = filename;
+            // Store arguments to execute later once stitching is finished
+            this._xhrArgs = [method, url, ...rest];
+            return; // Pause 'open' execution until send()
+        }
+        return originalXHROpen.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.send = async function(body) {
+        if (this._isSplitFile) {
+            const filename = this._splitFilename;
+            
+            // Wait for stitching to complete if it's still downloading parts
+            if (!blobUrls[filename]) {
+                console.log("XHR waiting for split file to finish stitching:", filename);
+                await loadPromises[filename];
+            }
+
+            if (blobUrls[filename]) {
+                console.log("Serving XHR from stitched blob:", filename);
+                // Swap the URL to our local blob URL
+                this._xhrArgs[1] = blobUrls[filename];
+                // Now safely execute native open and send
+                originalXHROpen.apply(this, this._xhrArgs);
+                return originalXHRSend.call(this, body);
+            }
+        }
+        return originalXHRSend.apply(this, arguments);
+    };
+
+    // Keep your original alert block
+    const originalAlert = window.alert;
+    window.alert = function (message) {
+        if (typeof message === "string" && /decodeAudioData/i.test(message)) {
+            console.log("Blocked alert for audio request:", message);
+            return;
+        }
+        return originalAlert.apply(this, arguments);
+    };
+})();
+</script>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | Pikuniku</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <script src="TemplateData/UnityProgress.js"></script>
+    <script src="Build/UnityLoader.js"></script>
+    <script>
+      var unityInstance = UnityLoader.instantiate("unityContainer", "Build/pikubog.json", {onProgress: UnityProgress});
+    </script>
+</head>
+  <style>* {margin: 0;padding: 0;box-sizing: border-box;}html,body {width: 100%;height: 100%;overflow: hidden;background: #121E1E;}.webgl-content {width: 100%;height: 100%;}#unityContainer {width: 100%;height: 100%;}#unityContainer canvas {width: 100% !important;height: 100% !important;display: block;}
+</style>
+  <body>
+    <div class="webgl-content">
+      <div id="unityContainer" style="width: 100%; height: 100%"></div>
+      </div>
+    </div>
+</body>
+</html>
